@@ -1,0 +1,8 @@
+name: pypackit-test1
+channels:
+- defaults
+dependencies:
+- python
+- pip
+- pip:
+  - pkgdata

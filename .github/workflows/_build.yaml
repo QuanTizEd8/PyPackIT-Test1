@@ -1,0 +1,164 @@
+# Generate a distribution package for PyPI.
+# Publish the package on PyPI or TestPyPI.
+# This reusable workflow uses the [pypi-publish](https://github.com/pypa/gh-action-pypi-publish) GitHub Action
+# to publish the distribution package on either PyPI or TestPyPI, depending on the input.
+
+name: '[Reusable]: Build'
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Configuration as a JSON string.
+        type: string
+        required: true
+jobs:
+  pure:
+    name: ${{ fromJSON(inputs.config).pkg.python.pure && 'Pure Python' || 'Source Distribution' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ fromJSON(inputs.config).repository }}
+          ref: ${{ fromJSON(inputs.config).ref }}
+          fetch-depth: 0
+          path: repo
+      - name: Python Setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+      - name: Environment Setup
+        shell: bash
+        run: |
+          echo "::group::Requirements Installation"
+          python -m pip install --upgrade pip build twine versioningit readme-renderer[md]
+          echo "::endgroup::"
+          echo "::group::Environment Overview"
+          python3 -c "import sys; print(sys.version)"
+          python3 -m pip list
+          echo "::endgroup::"
+      - name: Build
+        shell: bash
+        id: build
+        env:
+          PURE_PYTHON: ${{ !fromJSON(inputs.config).cibw }}
+          PKG_PATH: repo/${{ fromJSON(inputs.config).pkg.path.root }}
+          VERSIONINGIT_LOG_LEVEL: DEBUG  # https://versioningit.readthedocs.io/en/stable/configuration.html#log-level-environment-variable
+        run: |
+          echo "::group::Latest Git Tag"
+          git -C repo describe || true
+          echo "::endgroup::"
+
+          echo "::group::Versioning"
+          VERSION=$(versioningit $PKG_PATH --verbose)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+          echo "::group::Package Directory Overview"
+          ls -la "$PKG_PATH"
+          echo "::endgroup::"
+
+          echo "::group::Package Files Overview"
+          find "$PKG_PATH" -ls
+          echo "::endgroup::"
+
+          if $PURE_PYTHON; then
+            echo "::group::Source & Build Distribution"
+            python -m build $PKG_PATH --outdir ./dist --verbose
+            echo "::endgroup::"
+          else
+            echo "::group::Source Distribution"
+            python -m build $PKG_PATH --outdir ./dist --sdist --verbose
+            echo "::endgroup::"
+          fi
+      - name: PyPI README Check
+        if: fromJSON(inputs.config).pkg.readme.path
+        # Note:
+        #    `twine check` (https://twine.readthedocs.io/en/stable/#twine-check) only works for
+        #    reStructuredText (reST) READMEs; it always passes for Markdown content
+        #    (cf. `twine.commands.check._RENDERERS` (https://github.com/pypa/twine/blob/4f7cd66fa1ceba7f8de5230d3d4ebea0787f17e5/twine/commands/check.py#L32-L37))
+        #    and thus cannot be used to validate Markdown.
+        #    It is used here only to check the existence of the README file in the built distributions.
+        # Refs:
+        #    https://twine.readthedocs.io/en/stable/#twine-check
+        #    https://packaging.python.org/en/latest/guides/making-a-pypi-friendly-readme/#validating-restructuredtext-markup
+        run: twine check ./dist/*
+      - name: PyPI README Render
+        if: fromJSON(inputs.config).pkg.readme.path
+        shell: bash
+        run: >-
+          python -m readme_renderer
+          'repo/${{ fromJSON(inputs.config).pkg.readme.path }}'
+          --output ./README.html
+      - name: Source Distribution Upload
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./dist/*.tar.gz
+          name: ${{ fromJSON(inputs.config).artifact.sdist.name }}
+          include-hidden-files: ${{ fromJSON(inputs.config).artifact.sdist.include-hidden }}
+          retention-days: ${{ fromJSON(inputs.config).artifact.sdist.retention-days }}
+      - name: Binary Distribution Upload
+        if: ${{ !cancelled() && !fromJSON(inputs.config).cibw }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./dist/*.whl
+          name: ${{ fromJSON(inputs.config).artifact.wheel.name }}
+          include-hidden-files: ${{ fromJSON(inputs.config).artifact.wheel.include-hidden }}
+          retention-days: ${{ fromJSON(inputs.config).artifact.wheel.retention-days }}
+      - name: ReadMe Upload
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./README.html
+          name: ${{ fromJSON(inputs.config).artifact.readme.name }}
+          include-hidden-files: ${{ fromJSON(inputs.config).artifact.readme.include-hidden }}
+          retention-days: ${{ fromJSON(inputs.config).artifact.readme.retention-days }}
+  native:
+    name: Binary Distribution (${{ matrix.os }})
+    if: ${{ fromJSON(inputs.config).cibw }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(inputs.config).cibw }}
+    steps:
+      - name: Repository Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ fromJSON(inputs.config).repository }}
+          fetch-depth: 0
+          ref: ${{ fromJSON(inputs.config).ref }}
+          path: repo
+      - name: Build
+        # https://cibuildwheel.readthedocs.io/en/stable/
+        # https://github.com/pypa/cibuildwheel
+        uses: pypa/cibuildwheel@v2.16
+        with:
+          package-dir: ./repo/${{ fromJSON(inputs.config).pkg.path.root }}
+          output-dir: ./dist
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}
+          CIBW_BUILD_VERBOSITY: 2
+      - name: Build Upload
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./dist
+          name: ${{ matrix.artifact.wheel.name }}
+          include-hidden-files: ${{ matrix.artifact.wheel.include-hidden }}
+          retention-days: ${{ matrix.artifact.wheel.retention-days }}
+  wheel-merge:
+    name: Wheel Artifact Merge
+    if: ${{ !cancelled() && fromJSON(inputs.config).artifact.wheel.merge }}
+    needs: [ pure, native ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Artifact Merge
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: ${{ fromJSON(inputs.config).artifact.wheel.merge.name }}
+          pattern: ${{ fromJSON(inputs.config).artifact.wheel.merge.pattern }}
+          include-hidden-files: ${{ fromJSON(inputs.config).artifact.wheel.include-hidden }}
+          retention-days: ${{ fromJSON(inputs.config).artifact.wheel.retention-days }}
+          separate-directories: 'false'
+          delete-merged: 'true'

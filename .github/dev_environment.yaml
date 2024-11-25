@@ -1,0 +1,9 @@
+name: pypackit-test1-dev
+channels:
+- conda-forge
+- defaults
+dependencies:
+- python
+- pre-commit = 4.0.1
+- pylint = 3.3.0
+- mypy = 1.13.0
